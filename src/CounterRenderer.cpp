@@ -177,7 +177,7 @@ bool InitializeRenderer(IDirect3DDevice9* device)
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
 
     ImFontConfig config{};
-    config.SizePixels = 20.0f
+    config.SizePixels = 20.0f;
     g_digitFont = io.Fonts->AddFontDefault(&config); // Embedded ImGui font; no Japanese/external font dependency.
     if (!g_digitFont || !ImGui_ImplDX9_Init(device)) {
         if (ImGui::GetCurrentContext()) ImGui::DestroyContext(g_context);
