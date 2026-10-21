@@ -28,12 +28,16 @@ if(FORCE_PDB)
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
 endif()
 
-# Keep the SokuDev/ModTemplate dependency and version-check convention.
-# When working from a ModTemplate copy, initialize its SokuLib submodule recursively.
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/SokuLib/CMakeLists.txt")
-    message(FATAL_ERROR "SokuLib submodule is missing. Run: git submodule update --init --recursive")
+# Keep the SokuDev/ModTemplate SokuLib submodule, but compile only its version-hash
+# translation unit. ScoreTransfer uses no other SokuLib API. Building the whole
+# static library unnecessarily compiles every DLL proxy and its test programs;
+# the pinned proxy source currently fails around WS2_32_DLL.hpp on the Actions
+# toolchain, which is unrelated to this module's needs.
+set(SOKULIB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/SokuLib")
+if(NOT EXISTS "${SOKULIB_SOURCE_DIR}/src/Hash.cpp" OR NOT EXISTS "${SOKULIB_SOURCE_DIR}/src/Hash.hpp")
+    message(FATAL_ERROR "SokuLib submodule is missing or incomplete. Run: git submodule update --init --recursive")
 endif()
-add_subdirectory(SokuLib)
+set(SOKULIB_HASH_SOURCE "${SOKULIB_SOURCE_DIR}/src/Hash.cpp")
 
 include(FetchContent)
 FetchContent_Declare(imgui_source
@@ -88,16 +92,21 @@ add_library("${PROJECT_NAME}" MODULE
     src/D3D9Hook.cpp
     src/CounterRenderer.cpp
     src/ScoreTransfer.hpp
-    src/version.rc)
+    src/version.rc
+    "${SOKULIB_HASH_SOURCE}")
 set_target_properties("${PROJECT_NAME}" PROPERTIES PREFIX "" OUTPUT_NAME "${PROJECT_NAME}")
 target_compile_options("${PROJECT_NAME}" PRIVATE /W4 /EHsc /utf-8 /Zi)
 target_compile_definitions("${PROJECT_NAME}" PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX DIRECTINPUT_VERSION=0x0800
     CURL_STATICLIB _CRT_SECURE_NO_WARNINGS $<$<CONFIG:Debug>:_DEBUG>)
-target_include_directories("${PROJECT_NAME}" PRIVATE include SokuLib/directx "src/${PROJECT_NAME}/")
+target_include_directories("${PROJECT_NAME}" PRIVATE
+    include
+    "${SOKULIB_SOURCE_DIR}/src"
+    "${SOKULIB_SOURCE_DIR}/directx"
+    "src/${PROJECT_NAME}/")
 target_link_directories("${PROJECT_NAME}" PRIVATE lib)
 target_link_libraries("${PROJECT_NAME}" PRIVATE
-    SokuLib scoretransfer_sqlite scoretransfer_imgui
+    scoretransfer_sqlite scoretransfer_imgui
     shlwapi d3d9 d3dx9 user32 ole32 windowscodecs)
 
 # Install the DLL and the PNG as separate files side by side; bg.png is not embedded.

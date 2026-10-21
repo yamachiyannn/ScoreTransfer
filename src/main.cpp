@@ -1,5 +1,5 @@
 #include "ScoreTransfer.hpp"
-#include <SokuLib.hpp>
+#include <Hash.hpp>
 #include <cstring>
 
 extern "C" __declspec(dllexport) bool CheckVersion(const BYTE hash[16])
