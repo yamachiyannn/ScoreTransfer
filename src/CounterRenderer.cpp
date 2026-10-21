@@ -87,6 +87,23 @@ bool LoadBackgroundPixels(std::vector<unsigned char>& pixels)
         hr = converter->CopyPixels(nullptr, width * 4,
             static_cast<UINT>(pixels.size()), pixels.data());
         success = SUCCEEDED(hr);
+        if (success) {
+            // Keep the PNG's straight alpha channel all the way into D3DFMT_A8R8G8B8.
+            // If someone accidentally replaces bg.png with an opaque export, refuse to
+            // draw an opaque square over the match HUD instead of silently hiding it.
+            bool hasTransparency = false;
+            for (size_t i = 3; i < pixels.size(); i += 4) {
+                if (pixels[i] != 255) {
+                    hasTransparency = true;
+                    break;
+                }
+            }
+            if (!hasTransparency) {
+                OutputDebugStringW(L"[ScoreTransfer] bg.png has no non-opaque pixels; refusing to draw an opaque background.\n");
+                success = false;
+                hr = E_INVALIDARG;
+            }
+        }
     }
 
     if (converter) converter->Release();
@@ -115,6 +132,9 @@ bool CreateBackgroundTexture(IDirect3DDevice9* device)
         return false;
 
     IDirect3DTexture9* texture = nullptr;
+    // D3DFMT_A8R8G8B8 uses BGRA byte order on Win32 little-endian systems, matching
+    // WIC's GUID_WICPixelFormat32bppBGRA output. ImGui's DX9 backend enables SRCALPHA /
+    // INVSRCALPHA blending when it submits this texture, so PNG alpha is actually applied.
     const HRESULT result = device->CreateTexture(32, 32, 1, 0,
         D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &texture, nullptr);
     if (FAILED(result) || !texture) return false;
@@ -157,7 +177,7 @@ bool InitializeRenderer(IDirect3DDevice9* device)
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
 
     ImFontConfig config{};
-    config.SizePixels = 16.0f;
+    config.SizePixels = 20.0f
     g_digitFont = io.Fonts->AddFontDefault(&config); // Embedded ImGui font; no Japanese/external font dependency.
     if (!g_digitFont || !ImGui_ImplDX9_Init(device)) {
         if (ImGui::GetCurrentContext()) ImGui::DestroyContext(g_context);
@@ -179,7 +199,7 @@ void DrawCenteredNumber(ImDrawList* drawList, int value, float centerX, float ce
 {
     char buffer[32]{};
     _snprintf_s(buffer, sizeof(buffer), _TRUNCATE, "%d", (value < 0) ? 0 : value);
-    const float size = 16.0f * scale;
+    const float size = 16.0f * 1.3f * scale; // 1.3x the original rendered size.
     ImVec2 extent = g_digitFont->CalcTextSizeA(size, FLT_MAX, 0.0f, buffer);
     // Shrink only to stay inside the visible frame if unexpectedly large counts become many digits.
     if (extent.x > 23.0f * scale && extent.x > 0.0f) {
@@ -188,14 +208,14 @@ void DrawCenteredNumber(ImDrawList* drawList, int value, float centerX, float ce
         const ImVec2 pos(centerX - extent.x * 0.5f, centerY - extent.y * 0.5f);
         drawList->AddText(g_digitFont, size * adjustment, ImVec2(pos.x + 1.0f * scale, pos.y + 1.0f * scale),
             IM_COL32(0, 0, 0, 240), buffer);
-        drawList->AddText(g_digitFont, size * adjustment, pos, IM_COL32(255, 230, 45, 255), buffer);
+        drawList->AddText(g_digitFont, size * adjustment, pos, IM_COL32(255, 255, 255, 255), buffer);
         return;
     }
     const ImVec2 pos(centerX - extent.x * 0.5f, centerY - extent.y * 0.5f);
     // One-pixel black drop shadow, followed by the original-style yellow/gold digits.
     drawList->AddText(g_digitFont, size, ImVec2(pos.x + 1.0f * scale, pos.y + 1.0f * scale),
         IM_COL32(0, 0, 0, 240), buffer);
-    drawList->AddText(g_digitFont, size, pos, IM_COL32(255, 230, 45, 255), buffer);
+    drawList->AddText(g_digitFont, size, pos, IM_COL32(255, 255, 255, 255), buffer);
 }
 } // namespace
 
@@ -229,9 +249,9 @@ void RenderCounter(IDirect3DDevice9* device)
             ImVec2(405.0f * scaleX, 35.0f * scaleY));
     }
     DrawCenteredNumber(draw, g_leftWins.load(std::memory_order_acquire),
-        249.0f * scaleX, 20.0f * scaleY, scaleY);
+        247.0f * scaleX, 15.0f * scaleY, scaleY);
     DrawCenteredNumber(draw, g_rightWins.load(std::memory_order_acquire),
-        395.0f * scaleX, 20.0f * scaleY, scaleY);
+        393.0f * scaleX, 15.0f * scaleY, scaleY);
 
     ImGui::Render();
     IDirect3DStateBlock9* stateBlock = nullptr;
