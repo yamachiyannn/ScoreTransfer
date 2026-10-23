@@ -249,9 +249,9 @@ void RenderCounter(IDirect3DDevice9* device)
             ImVec2(405.0f * scaleX, 35.0f * scaleY));
     }
     DrawCenteredNumber(draw, g_leftWins.load(std::memory_order_acquire),
-        247.0f * scaleX, 25.0f * scaleY, scaleY);
+        247.0f * scaleX, 23.0f * scaleY, scaleY);
     DrawCenteredNumber(draw, g_rightWins.load(std::memory_order_acquire),
-        393.0f * scaleX, 25.0f * scaleY, scaleY);
+        393.0f * scaleX, 23.0f * scaleY, scaleY);
 
     ImGui::Render();
     IDirect3DStateBlock9* stateBlock = nullptr;
