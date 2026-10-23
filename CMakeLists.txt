@@ -107,11 +107,43 @@ target_include_directories("${PROJECT_NAME}" PRIVATE
 target_link_directories("${PROJECT_NAME}" PRIVATE lib)
 target_link_libraries("${PROJECT_NAME}" PRIVATE
     scoretransfer_sqlite scoretransfer_imgui
-    shlwapi d3d9 d3dx9 user32 ole32 windowscodecs)
+    shlwapi d3d9 d3dx9 user32 ole32 windowscodecs advapi32)
 
-# Install the DLL and the PNG as separate files side by side; bg.png is not embedded.
-install(TARGETS "${PROJECT_NAME}" DESTINATION .)
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/bg.png" DESTINATION .)
-install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
-install(FILES LICENSE DESTINATION . OPTIONAL)
-install(FILES "$<TARGET_PDB_FILE:${PROJECT_NAME}>" DESTINATION . OPTIONAL)
+# The optional standalone route consists of a small EXE and an injected bootstrap DLL.
+# Both entry routes load the same ScoreTransfer target above; these targets do not
+# duplicate the renderer or database implementation.
+add_executable(ScoreTransferLoader standalone/ScoreTransferLauncher.cpp)
+set_target_properties(ScoreTransferLoader PROPERTIES OUTPUT_NAME "ScoreTransferLoader")
+target_compile_options(ScoreTransferLoader PRIVATE /W4 /EHsc /utf-8)
+target_compile_definitions(ScoreTransferLoader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(ScoreTransferLoader PRIVATE user32)
+
+add_library(ScoreTransferBootstrap MODULE standalone/ScoreTransferBootstrap.cpp)
+set_target_properties(ScoreTransferBootstrap PROPERTIES PREFIX "" OUTPUT_NAME "ScoreTransferBootstrap")
+target_compile_options(ScoreTransferBootstrap PRIVATE /W4 /EHsc /utf-8)
+target_compile_definitions(ScoreTransferBootstrap PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(ScoreTransferBootstrap PRIVATE user32)
+
+# Install both loading modes side-by-side in a single artifact tree.
+#
+# artifact/ScoreTransfer/        -> standard SWRSToys module
+# artifact/ScoreTransfer-loader/ -> standalone EXE + bootstrap + the same plugin DLL
+# bg.png stays an external RGBA PNG in both directories; CounterRenderer.cpp and the
+# uploaded bg.png asset are deliberately unchanged so their positions/alpha are preserved.
+install(TARGETS "${PROJECT_NAME}"
+    RUNTIME DESTINATION "ScoreTransfer"
+    LIBRARY DESTINATION "ScoreTransfer")
+install(FILES "$<TARGET_FILE:${PROJECT_NAME}>" DESTINATION "ScoreTransfer-loader")
+install(TARGETS ScoreTransferBootstrap
+    RUNTIME DESTINATION "ScoreTransfer-loader"
+    LIBRARY DESTINATION "ScoreTransfer-loader")
+install(TARGETS ScoreTransferLoader RUNTIME DESTINATION "ScoreTransfer-loader")
+
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/bg.png" DESTINATION "ScoreTransfer")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/bg.png" DESTINATION "ScoreTransfer-loader")
+install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION "ScoreTransfer")
+install(FILES README_STANDALONE.md THIRD_PARTY_NOTICES.md DESTINATION "ScoreTransfer-loader")
+install(FILES LICENSE DESTINATION "ScoreTransfer" OPTIONAL)
+install(FILES LICENSE DESTINATION "ScoreTransfer-loader" OPTIONAL)
+install(FILES "$<TARGET_PDB_FILE:${PROJECT_NAME}>" DESTINATION "ScoreTransfer" OPTIONAL)
+install(FILES "$<TARGET_PDB_FILE:${PROJECT_NAME}>" DESTINATION "ScoreTransfer-loader" OPTIONAL)
