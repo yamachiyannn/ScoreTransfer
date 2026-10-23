@@ -1,41 +1,60 @@
 name: build
+
 on:
   workflow_dispatch:
   push:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
 
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        config: ["Release", "Debug"]
+        config: [Release, Debug]
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository and SokuLib submodule
+        uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+
+      - name: Configure MSVC x86 environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
         with:
           arch: amd64_x86
-      - name: build
+
+      - name: Configure and build both loading modes
         shell: bash
         run: |
-          mkdir build upload
-          touch upload/.a-workaround-to-avoid-being-flattened
-          cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }}
-          project_name=$(grep '^CMAKE_PROJECT_NAME:STATIC=' CMakeCache.txt | cut -d = -f 2-)
-          config=${{ matrix.config }}
-          echo "ARTIFACT_NAME=${project_name}_${config,,}" >> ${GITHUB_ENV}
-          echo "PROJECT_NAME=${project_name}" >> ${GITHUB_ENV}
-          cmake --build .
-          cmake --install . --prefix "../artifact/${project_name}"
-      - name: Upload the ${{ matrix.config }} binary
+          set -euxo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DFORCE_PDB=ON
+          cmake --build build --parallel
+          pushd build
+          cmake --install . --prefix ../artifact
+          popd
+
+          # Fail early if either package is incomplete, instead of uploading a confusing ZIP.
+          test -f artifact/ScoreTransfer/ScoreTransfer.dll
+          test -f artifact/ScoreTransfer/bg.png
+          test -f artifact/ScoreTransfer-loader/ScoreTransferLoader.exe
+          test -f artifact/ScoreTransfer-loader/ScoreTransferBootstrap.dll
+          test -f artifact/ScoreTransfer-loader/ScoreTransfer.dll
+          test -f artifact/ScoreTransfer-loader/bg.png
+          cmp -s artifact/ScoreTransfer/ScoreTransfer.dll artifact/ScoreTransfer-loader/ScoreTransfer.dll
+          cmp -s artifact/ScoreTransfer/bg.png artifact/ScoreTransfer-loader/bg.png
+
+      - name: Upload both packages in one artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ScoreTransfer_${{ matrix.config }}
           path: |
-            artifact/${{ env.PROJECT_NAME }}
-            artifact/.a-workaround-to-avoid-being-flattened
-            !artifact/.a-workaround-to-avoid-being-flattened
+            artifact/ScoreTransfer/
+            artifact/ScoreTransfer-loader/
+          if-no-files-found: error
+          compression-level: 6
