@@ -141,7 +141,10 @@ install(TARGETS ScoreTransferLoader RUNTIME DESTINATION "ScoreTransfer-loader")
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/bg.png" DESTINATION "ScoreTransfer")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/bg.png" DESTINATION "ScoreTransfer-loader")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/ScoreTransfer.ini" DESTINATION "ScoreTransfer")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/ScoreTransfer.ini" DESTINATION "ScoreTransfer-loader")
 install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION "ScoreTransfer")
+# The loader package does not require a separate README file.
 install(FILES THIRD_PARTY_NOTICES.md DESTINATION "ScoreTransfer-loader")
 install(FILES LICENSE DESTINATION "ScoreTransfer" OPTIONAL)
 install(FILES LICENSE DESTINATION "ScoreTransfer-loader" OPTIONAL)

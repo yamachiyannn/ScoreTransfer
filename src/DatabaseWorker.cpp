@@ -1,10 +1,14 @@
 #include "ScoreTransfer.hpp"
 
 #include <sqlite3.h>
+#include <TlHelp32.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <cwchar>
+#include <cwctype>
 #include <limits>
 #include <string>
 #include <utility>
@@ -251,31 +255,246 @@ std::vector<LatestRun> BuildRuns(std::vector<MatchRecord>& records)
     return runs; // oldest first, like the chronological OIV source table
 }
 
+std::wstring DirectoryOfPath(const std::wstring& path)
+{
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos)
+        return {};
+    // Preserve the trailing slash for a drive root such as C:\file.exe.
+    if (slash == 2 && path.size() >= 3 && path[1] == L':')
+        return path.substr(0, 3);
+    return path.substr(0, slash);
+}
+
+std::wstring JoinPath(const std::wstring& directory, const std::wstring& leaf)
+{
+    if (directory.empty()) return {};
+    if (directory.back() == L'\\' || directory.back() == L'/')
+        return directory + leaf;
+    return directory + L"\\" + leaf;
+}
+
 std::wstring GameDirectory()
 {
     wchar_t path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (!length || length >= MAX_PATH) return {};
-    std::wstring result(path, length);
-    const size_t slash = result.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return {};
-    return result.substr(0, slash);
+    return DirectoryOfPath(std::wstring(path, length));
+}
+
+std::wstring PluginDirectory()
+{
+    if (!g_module) return {};
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(g_module, path, MAX_PATH);
+    if (!length || length >= MAX_PATH) return {};
+    return DirectoryOfPath(std::wstring(path, length));
 }
 
 bool IsFile(const std::wstring& path)
 {
+    if (path.empty()) return false;
     const DWORD attrs = GetFileAttributesW(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+std::wstring TrimWide(std::wstring value)
+{
+    const auto isSpace = [](wchar_t ch) { return std::iswspace(static_cast<std::wint_t>(ch)) != 0; };
+    size_t first = 0;
+    size_t last = value.size();
+    while (first < last && isSpace(value[first])) ++first;
+    while (last > first && isSpace(value[last - 1])) --last;
+    return value.substr(first, last - first);
+}
+
+bool DecodeMultibyte(UINT codePage, DWORD flags, const char* bytes, int length, std::wstring& output)
+{
+    output.clear();
+    if (length <= 0) return true;
+    const int characters = MultiByteToWideChar(codePage, flags, bytes, length, nullptr, 0);
+    if (characters <= 0) return false;
+    output.resize(static_cast<size_t>(characters));
+    return MultiByteToWideChar(codePage, flags, bytes, length, output.data(), characters) == characters;
+}
+
+bool ReadTextFile(const std::wstring& path, std::wstring& output)
+{
+    output.clear();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER fileSize{};
+    if (!GetFileSizeEx(file, &fileSize) || fileSize.QuadPart < 0 || fileSize.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        return false;
+    }
+    std::vector<unsigned char> bytes(static_cast<size_t>(fileSize.QuadPart));
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const DWORD request = static_cast<DWORD>(std::min<size_t>(bytes.size() - offset, 64 * 1024));
+        DWORD received = 0;
+        if (!ReadFile(file, bytes.data() + offset, request, &received, nullptr) || received == 0) {
+            CloseHandle(file);
+            return false;
+        }
+        offset += received;
+    }
+    CloseHandle(file);
+
+    if (bytes.empty()) return true;
+    if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        const size_t byteCount = bytes.size() - 2;
+        if ((byteCount % sizeof(wchar_t)) != 0) return false;
+        output.resize(byteCount / sizeof(wchar_t));
+        if (byteCount) std::memcpy(output.data(), bytes.data() + 2, byteCount);
+        return true;
+    }
+    if (bytes.size() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        if (((bytes.size() - 2) % 2) != 0) return false;
+        output.reserve((bytes.size() - 2) / 2);
+        for (size_t i = 2; i + 1 < bytes.size(); i += 2)
+            output.push_back(static_cast<wchar_t>((static_cast<unsigned int>(bytes[i]) << 8) | bytes[i + 1]));
+        return true;
+    }
+
+    size_t start = 0;
+    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        start = 3;
+    const char* content = reinterpret_cast<const char*>(bytes.data() + start);
+    const int contentLength = static_cast<int>(bytes.size() - start);
+    if (DecodeMultibyte(CP_UTF8, MB_ERR_INVALID_CHARS, content, contentLength, output))
+        return true;
+    // Accept legacy ANSI INI files as well as UTF-8 (with or without BOM).
+    return DecodeMultibyte(CP_ACP, 0, content, contentLength, output);
+}
+
+std::wstring ReadConfiguredDatabasePath()
+{
+    const std::wstring pluginDirectory = PluginDirectory();
+    if (pluginDirectory.empty()) return {};
+    const std::wstring iniPath = JoinPath(pluginDirectory, L"ScoreTransfer.ini");
+    if (!IsFile(iniPath)) return {};
+
+    std::wstring text;
+    if (!ReadTextFile(iniPath, text)) {
+        OutputDebugStringW(L"[ScoreTransfer] ScoreTransfer.ini could not be read; using automatic Default.db search.\n");
+        return {};
+    }
+
+    // Accept DBPath either in [Database] (recommended) or as a bare key. This
+    // makes the simple "DBPath=..." form forgiving while keeping the sample INI clear.
+    size_t lineStart = 0;
+    while (lineStart <= text.size()) {
+        const size_t lineEnd = text.find_first_of(L"\r\n", lineStart);
+        std::wstring line = TrimWide(text.substr(lineStart,
+            lineEnd == std::wstring::npos ? std::wstring::npos : lineEnd - lineStart));
+        if (!line.empty() && line[0] != L';' && line[0] != L'#' && line[0] != L'[') {
+            const size_t equals = line.find(L'=');
+            if (equals != std::wstring::npos) {
+                const std::wstring key = TrimWide(line.substr(0, equals));
+                if (_wcsicmp(key.c_str(), L"DBPath") == 0) {
+                    std::wstring value = TrimWide(line.substr(equals + 1));
+                    if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"')
+                        value = TrimWide(value.substr(1, value.size() - 2));
+                    return value;
+                }
+            }
+        }
+        if (lineEnd == std::wstring::npos) break;
+        lineStart = lineEnd + 1;
+        if (lineStart < text.size() && text[lineEnd] == L'\r' && text[lineStart] == L'\n')
+            ++lineStart;
+    }
+    return {};
+}
+
+bool IsAbsoluteWindowsPath(const std::wstring& path)
+{
+    if (path.size() >= 3 && std::iswalpha(static_cast<std::wint_t>(path[0])) && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'))
+        return true;
+    return path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\'; // UNC / extended path
+}
+
+std::wstring ProcessImagePath(DWORD processId)
+{
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) return {};
+    wchar_t path[MAX_PATH]{};
+    DWORD length = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &length);
+    CloseHandle(process);
+    return ok && length > 0 && length < MAX_PATH ? std::wstring(path, length) : std::wstring{};
+}
+
+std::wstring FindDatabaseBesideRunningTsk()
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return {};
+
+    std::wstring result;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"tsk.exe") != 0)
+                continue;
+            const std::wstring executablePath = ProcessImagePath(entry.th32ProcessID);
+            if (executablePath.empty()) continue;
+            const std::wstring databasePath = JoinPath(DirectoryOfPath(executablePath), L"Default.db");
+            if (IsFile(databasePath)) {
+                result = databasePath;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+std::wstring FindDatabaseBesideNearbyTsk(const std::wstring& gameDirectory)
+{
+    // If TSK is not running, try the game's directory and up to three parent
+    // directories. We only accept a directory when both tsk.exe and Default.db exist.
+    std::wstring directory = gameDirectory;
+    for (int depth = 0; depth < 4 && !directory.empty(); ++depth) {
+        if (IsFile(JoinPath(directory, L"tsk.exe"))) {
+            const std::wstring databasePath = JoinPath(directory, L"Default.db");
+            if (IsFile(databasePath)) return databasePath;
+        }
+        const std::wstring parent = DirectoryOfPath(directory);
+        if (parent.empty() || _wcsicmp(parent.c_str(), directory.c_str()) == 0)
+            break;
+        directory = parent;
+    }
+    return {};
+}
+
 std::wstring FindDefaultDatabase()
 {
-    const std::wstring root = GameDirectory();
-    if (root.empty()) return {};
-    const std::wstring nested = root + L"\\th4_5888\\Default.db";
-    if (IsFile(nested)) return nested;
-    const std::wstring rootDb = root + L"\\Default.db";
-    if (IsFile(rootDb)) return rootDb;
+    const std::wstring configured = ReadConfiguredDatabasePath();
+    if (!configured.empty()) {
+        if (IsAbsoluteWindowsPath(configured))
+            return configured; // A non-empty full path overrides all automatic discovery.
+        OutputDebugStringW(L"[ScoreTransfer] DBPath must be an absolute path; using automatic Default.db search.\n");
+    }
+
+    // Automatic search order requested for ScoreTransfer:
+    // 1) Default.db beside a running tsk.exe.
+    // 2) If no usable TSK-side DB was found, nearby tsk.exe + its sibling Default.db.
+    // 3) <th123.exe directory>\\th4_5888\\Default.db.
+    std::wstring path = FindDatabaseBesideRunningTsk();
+    if (!path.empty()) return path;
+
+    const std::wstring gameDirectory = GameDirectory();
+    if (gameDirectory.empty()) return {};
+    path = FindDatabaseBesideNearbyTsk(gameDirectory);
+    if (!path.empty()) return path;
+
+    const std::wstring fallback = JoinPath(JoinPath(gameDirectory, L"th4_5888"), L"Default.db");
+    if (IsFile(fallback)) return fallback;
     return {};
 }
 
@@ -472,7 +691,10 @@ DWORD WINAPI WorkerThreadEntry(void*)
                     hasLoadedDb = true;
                     loadedPath = path;
                     loadedFingerprint = currentFingerprint;
-                    OutputDebugStringW(L"[ScoreTransfer] Default.db loaded (read-only).\n");
+                    std::wstring loadedMessage = L"[ScoreTransfer] Default.db loaded (read-only): ";
+                    loadedMessage += path;
+                    loadedMessage += L"\n";
+                    OutputDebugStringW(loadedMessage.c_str());
                 } else {
                     cachedRuns.clear();
                     hasLoadedDb = false; // Retry on the next poll; never reuse stale or other-profile counts.
